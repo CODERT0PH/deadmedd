@@ -1,0 +1,762 @@
+================================================================================
+NOMBRE DE LA SOLUCION: eb7420u202323551
+PROYECTO API: eb7420u202323551.API
+ESTUDIANTE: Christoper Steven Rivas Castillo
+CODIGO: u202323551
+================================================================================
+
+*** FILE: Properties/launchSettings.json ***
+{
+  "$schema": "https://json.schemastore.org/launchsettings.json",
+  "profiles": {
+    "http": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "launchUrl": "swagger",
+      "applicationUrl": "http://localhost:5224",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    },
+    "https": {
+      "commandName": "Project",
+      "dotnetRunMessages": true,
+      "launchBrowser": true,
+      "launchUrl": "swagger",
+      "applicationUrl": "https://localhost:7117;http://localhost:5224",
+      "environmentVariables": {
+        "ASPNETCORE_ENVIRONMENT": "Development"
+      }
+    }
+  }
+}
+
+*** FILE: appsettings.json ***
+{
+  "ConnectionStrings": {
+    "DefaultConnection": "server=localhost;port=3306;database=ripley_db;user=root;password=root;"
+  },
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*"
+}
+
+*** FILE: Program.cs ***
+using eb7420u202323551.API.Catalog.Infrastructure.Persistence.EFC.Seed;
+using eb7420u202323551.API.Shared.Infrastructure.Documentation.OpenApi.Configuration.Extensions;
+using eb7420u202323551.API.Shared.Infrastructure.Interfaces.ASP;
+using eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Configuration;
+using eb7420u202323551.API.Catalog.Infrastructure.Configuration.Extensions;
+using eb7420u202323551.API.Orders.Infrastructure.Configuration.Extensions;
+using eb7420u202323551.API.Shared.Domain.Repositories;
+using eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Repositories;
+using Microsoft.EntityFrameworkCore;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// 1. Configurar Kebab-case
+builder.Services.AddControllers(options => options.Conventions.Add(new KebabCaseRouteNamingConvention()));
+
+// 2. Database
+var connectionString = builder.Configuration.GetConnectionString("DefaultConnection");
+if (connectionString == null) throw new InvalidOperationException("Connection string not found.");
+
+builder.Services.AddDbContext<AppDbContext>(options =>
+{
+    if (builder.Environment.IsDevelopment())
+        options.UseMySQL(connectionString)
+            .LogTo(Console.WriteLine, LogLevel.Information)
+            .EnableSensitiveDataLogging()
+            .EnableDetailedErrors();
+    else
+        options.UseMySQL(connectionString);
+});
+
+// 3. Shared Services (UnitOfWork)
+builder.Services.AddScoped<IUnitOfWork, UnitOfWork>();
+
+// 4. Documentation
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+builder.AddOpenApiDocumentation();
+
+// 5. Bounded Contexts
+builder.AddCatalogContextService();
+builder.AddOrdersContextService();
+
+var app = builder.Build();
+
+// 6. Seeding
+using (var scope = app.Services.CreateScope())
+{
+    var services = scope.ServiceProvider;
+    var context = services.GetRequiredService<AppDbContext>();
+    await context.Database.EnsureCreatedAsync();
+    await ProductSeed.EnsureSeededAsync(context);
+}
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
+
+app.UseHttpsRedirection();
+app.UseAuthorization();
+app.MapControllers();
+
+app.Run();
+
+/* -------------------------------------------------------------------------- */
+/* BOUNDED CONTEXT: SHARED                         */
+/* -------------------------------------------------------------------------- */
+
+*** FILE: Shared/Domain/Repositories/IBaseRepository.cs ***
+namespace eb7420u202323551.API.Shared.Domain.Repositories;
+
+public interface IBaseRepository<TEntity>
+{
+    Task AddAsync(TEntity entity);
+    Task<TEntity?> FindByIdAsync(int id);
+    void Update(TEntity entity);
+    void Remove(TEntity entity);
+    Task<IEnumerable<TEntity>> ListAsync();
+}
+
+*** FILE: Shared/Domain/Repositories/IUnitOfWork.cs ***
+namespace eb7420u202323551.API.Shared.Domain.Repositories;
+
+public interface IUnitOfWork
+{
+    Task CompleteAsync();
+}
+
+*** FILE: Shared/Infrastructure/Persistence/EFC/Repositories/BaseRepository.cs ***
+using eb7420u202323551.API.Shared.Domain.Repositories;
+using eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Configuration;
+using Microsoft.EntityFrameworkCore;
+
+namespace eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Repositories;
+
+public abstract class BaseRepository<TEntity>(AppDbContext context) : IBaseRepository<TEntity>
+    where TEntity : class
+{
+    protected readonly AppDbContext Context = context;
+
+    public async Task AddAsync(TEntity entity) => await Context.Set<TEntity>().AddAsync(entity);
+    public async Task<TEntity?> FindByIdAsync(int id) => await Context.Set<TEntity>().FindAsync(id);
+    public void Update(TEntity entity) => Context.Set<TEntity>().Update(entity);
+    public void Remove(TEntity entity) => Context.Set<TEntity>().Remove(entity);
+    public async Task<IEnumerable<TEntity>> ListAsync() => await Context.Set<TEntity>().ToListAsync();
+}
+
+*** FILE: Shared/Infrastructure/Persistence/EFC/Repositories/UnitOfWork.cs ***
+using eb7420u202323551.API.Shared.Domain.Repositories;
+using eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Configuration;
+
+namespace eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Repositories;
+
+public class UnitOfWork(AppDbContext context) : IUnitOfWork
+{
+    public async Task CompleteAsync() => await context.SaveChangesAsync();
+}
+
+*** FILE: Shared/Infrastructure/Persistence/EFC/Configuration/AppDbContext.cs ***
+using eb7420u202323551.API.Catalog.Domain.Model.Aggregates;
+using eb7420u202323551.API.Orders.Domain.Model.Aggregates;
+using eb7420u202323551.API.Catalog.Infrastructure.Persistence.EFC.Configuration;
+using eb7420u202323551.API.Orders.Infrastructure.Persistence.EFC.Configuration;
+using eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Configuration.Extensions;
+using EntityFrameworkCore.CreatedUpdatedDate.Extensions;
+using Microsoft.EntityFrameworkCore;
+
+namespace eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Configuration;
+
+public class AppDbContext(DbContextOptions options) : DbContext(options)
+{
+    public DbSet<Product> Products => Set<Product>();
+    public DbSet<PurchaseRequest> PurchaseRequests => Set<PurchaseRequest>();
+
+    protected override void OnConfiguring(DbContextOptionsBuilder builder)
+    {
+        builder.AddCreatedUpdatedInterceptor();
+        base.OnConfiguring(builder);
+    }
+
+    protected override void OnModelCreating(ModelBuilder builder)
+    {
+        base.OnModelCreating(builder);
+        builder.UseSnakeCaseNamingConvention();
+        builder.ApplyConfiguration(new ProductConfiguration());
+        builder.ApplyConfiguration(new PurchaseRequestConfiguration());
+    }
+}
+
+*** FILE: Shared/Infrastructure/Interfaces/ASP/KebabCaseRouteNamingConvention.cs ***
+using eb7420u202323551.API.Shared.Infrastructure.Interfaces.ASP.Extensions;
+using Microsoft.AspNetCore.Mvc.ApplicationModels;
+
+namespace eb7420u202323551.API.Shared.Infrastructure.Interfaces.ASP;
+
+public class KebabCaseRouteNamingConvention : IControllerModelConvention
+{
+    public void Apply(ControllerModel controller)
+    {
+        foreach (var selector in controller.Selectors)
+            selector.AttributeRouteModel = ReplaceControllerTemplate(selector, controller.ControllerName);
+
+        foreach (var selector in controller.Actions.SelectMany(a => a.Selectors))
+            selector.AttributeRouteModel = ReplaceControllerTemplate(selector, controller.ControllerName);
+    }
+
+    private static AttributeRouteModel? ReplaceControllerTemplate(SelectorModel selector, string name)
+    {
+        return selector.AttributeRouteModel != null
+            ? new AttributeRouteModel
+            {
+                Template = selector.AttributeRouteModel.Template?.Replace("[controller]", name.ToKebabCase())
+            }
+            : null;
+    }
+}
+
+*** FILE: Shared/Infrastructure/Interfaces/ASP/Extensions/StringExtensions.cs ***
+using System.Text.RegularExpressions;
+
+namespace eb7420u202323551.API.Shared.Infrastructure.Interfaces.ASP.Extensions;
+
+public static partial class StringExtensions
+{
+    [GeneratedRegex("(?<!^)([A-Z])", RegexOptions.Compiled)]
+    private static partial Regex KebabCaseRegex();
+
+    public static string ToKebabCase(this string text)
+    {
+        return string.IsNullOrEmpty(text) 
+            ? text 
+            : KebabCaseRegex().Replace(text, "-$1").Trim().ToLower();
+    }
+}
+
+*** FILE: Shared/Infrastructure/Documentation/OpenApi/Configuration/Extensions/WebApplicationBuilderExtensions.cs ***
+using Microsoft.OpenApi.Models;
+
+namespace eb7420u202323551.API.Shared.Infrastructure.Documentation.OpenApi.Configuration.Extensions;
+
+public static class WebApplicationBuilderExtensions
+{
+    public static void AddOpenApiDocumentation(this WebApplicationBuilder builder)
+    {
+        builder.Services.AddEndpointsApiExplorer();
+        builder.Services.AddSwaggerGen(options =>
+        {
+            options.SwaggerDoc("v1",
+                new OpenApiInfo
+                {
+                    Title = "Ripley.Platform.u202323551",
+                    Version = "v1",
+                    Description = "Ripley Smart Orders Platform API",
+                    Contact = new OpenApiContact
+                    {
+                        Name = "Christoper Steven Rivas Castillo",
+                        Email = "u202323551@upc.edu.pe"
+                    },
+                    License = new OpenApiLicense
+                    {
+                        Name = "Apache 2.0",
+                        Url = new Uri("https://www.apache.org/licenses/LICENSE-2.0.html")
+                    }
+                });
+            options.EnableAnnotations();
+        });
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* BOUNDED CONTEXT: CATALOG                         */
+/* -------------------------------------------------------------------------- */
+
+*** FILE: Catalog/Domain/Model/Aggregates/Product.cs ***
+using EntityFrameworkCore.CreatedUpdatedDate.Contracts;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace eb7420u202323551.API.Catalog.Domain.Model.Aggregates;
+
+public class Product : IEntityWithCreatedUpdatedDate
+{
+    public int Id { get; private set; }
+    public string Sku { get; private set; }
+    public string Name { get; private set; }
+    public decimal BasePrice { get; private set; }
+    public int AvailableStock { get; set; }
+
+    [Column("CreatedAt")] public DateTimeOffset? CreatedDate { get; set; }
+    [Column("UpdatedAt")] public DateTimeOffset? UpdatedDate { get; set; }
+
+    private Product() { }
+
+    public Product(string sku, string name, decimal basePrice, int availableStock)
+    {
+        Sku = sku;
+        Name = name;
+        BasePrice = basePrice;
+        AvailableStock = availableStock;
+    }
+}
+
+*** FILE: Catalog/Domain/Repositories/IProductRepository.cs ***
+using eb7420u202323551.API.Catalog.Domain.Model.Aggregates;
+using eb7420u202323551.API.Shared.Domain.Repositories;
+
+namespace eb7420u202323551.API.Catalog.Domain.Repositories;
+
+public interface IProductRepository : IBaseRepository<Product>
+{
+    Task<Product?> FindBySkuAsync(string sku);
+}
+
+*** FILE: Catalog/Infrastructure/Persistence/EFC/Repositories/ProductRepository.cs ***
+using eb7420u202323551.API.Catalog.Domain.Model.Aggregates;
+using eb7420u202323551.API.Catalog.Domain.Repositories;
+using eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Configuration;
+using eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Repositories;
+using Microsoft.EntityFrameworkCore;
+
+namespace eb7420u202323551.API.Catalog.Infrastructure.Persistence.EFC.Repositories;
+
+public class ProductRepository(AppDbContext context) : BaseRepository<Product>(context), IProductRepository
+{
+    public async Task<Product?> FindBySkuAsync(string sku)
+    {
+        return await Context.Set<Product>().FirstOrDefaultAsync(p => p.Sku == sku);
+    }
+}
+
+*** FILE: Catalog/Infrastructure/Persistence/EFC/Configuration/ProductConfiguration.cs ***
+using eb7420u202323551.API.Catalog.Domain.Model.Aggregates;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace eb7420u202323551.API.Catalog.Infrastructure.Persistence.EFC.Configuration;
+
+public class ProductConfiguration : IEntityTypeConfiguration<Product>
+{
+    public void Configure(EntityTypeBuilder<Product> builder)
+    {
+        builder.HasKey(x => x.Id);
+        builder.Property(x => x.Sku).IsRequired().HasMaxLength(10);
+        builder.Property(x => x.Name).IsRequired().HasMaxLength(100);
+        builder.Property(x => x.BasePrice).IsRequired();
+        builder.Property(x => x.AvailableStock).IsRequired();
+    }
+}
+
+*** FILE: Catalog/Infrastructure/Persistence/EFC/Seed/ProductSeed.cs ***
+using eb7420u202323551.API.Catalog.Domain.Model.Aggregates;
+using eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Configuration;
+using Microsoft.EntityFrameworkCore;
+
+namespace eb7420u202323551.API.Catalog.Infrastructure.Persistence.EFC.Seed;
+
+public static class ProductSeed
+{
+    public static async Task EnsureSeededAsync(AppDbContext context)
+    {
+        if (await context.Products.AnyAsync()) return;
+
+        var products = new[]
+        {
+            new Product("RPL-TSH-01", "Polo básico hombre", 39.9m, 120),
+            new Product("RPL-DRS-11", "Vestido casual mujer", 129m, 45),
+            new Product("RPL-SHO-20", "Zapatillas urbanas unisex", 199m, 80),
+            new Product("RPL-HME-02", "Juego de sábanas 2 plazas", 89.9m, 60)
+        };
+
+        await context.Products.AddRangeAsync(products);
+        await context.SaveChangesAsync();
+    }
+}
+
+*** FILE: Catalog/Domain/Model/Queries/GetAllProductsQuery.cs ***
+namespace eb7420u202323551.API.Catalog.Domain.Model.Queries;
+public record GetAllProductsQuery();
+
+*** FILE: Catalog/Domain/Services/IProductQueryService.cs ***
+using eb7420u202323551.API.Catalog.Domain.Model.Aggregates;
+using eb7420u202323551.API.Catalog.Domain.Model.Queries;
+
+namespace eb7420u202323551.API.Catalog.Domain.Services;
+
+public interface IProductQueryService
+{
+    Task<IEnumerable<Product>> Handle(GetAllProductsQuery query);
+}
+
+*** FILE: Catalog/Application/Internal/QueryServices/ProductQueryService.cs ***
+using eb7420u202323551.API.Catalog.Domain.Model.Aggregates;
+using eb7420u202323551.API.Catalog.Domain.Model.Queries;
+using eb7420u202323551.API.Catalog.Domain.Repositories;
+using eb7420u202323551.API.Catalog.Domain.Services;
+
+namespace eb7420u202323551.API.Catalog.Application.Internal.QueryServices;
+
+public class ProductQueryService(IProductRepository productRepository) : IProductQueryService
+{
+    public async Task<IEnumerable<Product>> Handle(GetAllProductsQuery query)
+    {
+        return await productRepository.ListAsync();
+    }
+}
+
+*** FILE: Catalog/Infrastructure/Configuration/Extensions/WebApplicationBuilderExtensions.cs ***
+using eb7420u202323551.API.Catalog.Application.Internal.QueryServices;
+using eb7420u202323551.API.Catalog.Domain.Repositories;
+using eb7420u202323551.API.Catalog.Domain.Services;
+using eb7420u202323551.API.Catalog.Infrastructure.Persistence.EFC.Repositories;
+
+namespace eb7420u202323551.API.Catalog.Infrastructure.Configuration.Extensions;
+
+public static class WebApplicationBuilderExtensions
+{
+    public static void AddCatalogContextService(this WebApplicationBuilder builder)
+    {
+        builder.Services.AddScoped<IProductRepository, ProductRepository>();
+        builder.Services.AddScoped<IProductQueryService, ProductQueryService>();
+    }
+}
+
+*** FILE: Catalog/Interfaces/REST/ProductsController.cs ***
+using eb7420u202323551.API.Catalog.Domain.Model.Queries;
+using eb7420u202323551.API.Catalog.Domain.Services;
+using Microsoft.AspNetCore.Mvc;
+
+namespace eb7420u202323551.API.Catalog.Interfaces.REST;
+
+[ApiController]
+[Route("api/v1/[controller]")]
+public class ProductsController(IProductQueryService productQueryService) : ControllerBase
+{
+    [HttpGet]
+    public async Task<IActionResult> GetAllProducts()
+    {
+        var products = await productQueryService.Handle(new GetAllProductsQuery());
+        return Ok(products);
+    }
+}
+
+/* -------------------------------------------------------------------------- */
+/* BOUNDED CONTEXT: ORDERS                          */
+/* -------------------------------------------------------------------------- */
+
+*** FILE: Orders/Domain/Model/ValueObjects/Sku.cs ***
+using System.Text.RegularExpressions;
+
+namespace eb7420u202323551.API.Orders.Domain.Model.ValueObjects;
+
+public record Sku
+{
+    public string Value { get; }
+
+    public Sku(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length != 10 || !Regex.IsMatch(value, @"^[A-Z]{3}-[A-Z]{3}-\d{2}$"))
+        {
+            throw new ArgumentException("Invalid SKU format. Expected AAA-AAA-00.");
+        }
+        Value = value;
+    }
+    
+    private Sku() { Value = string.Empty; }
+}
+
+*** FILE: Orders/Domain/Model/Enumerations/EDeliveryMethod.cs ***
+namespace eb7420u202323551.API.Orders.Domain.Model.Enumerations;
+
+public enum EDeliveryMethod
+{
+    IN_STORE_PICKUP = 0,
+    HOME_DELIVERY = 1
+}
+
+*** FILE: Orders/Domain/Model/Enumerations/EOrderPriority.cs ***
+namespace eb7420u202323551.API.Orders.Domain.Model.Enumerations;
+
+public enum EOrderPriority
+{
+    STANDARD = 0,
+    EXPRESS = 1
+}
+
+*** FILE: Orders/Domain/Model/Commands/CreatePurchaseRequestCommand.cs ***
+using eb7420u202323551.API.Orders.Domain.Model.Enumerations;
+
+namespace eb7420u202323551.API.Orders.Domain.Model.Commands;
+
+public record CreatePurchaseRequestCommand(
+    string CustomerId,
+    string ProductSku,
+    int Quantity,
+    EDeliveryMethod DeliveryMethod,
+    EOrderPriority OrderPriority,
+    DateTime RequestedAt
+);
+
+*** FILE: Orders/Domain/Model/Aggregates/PurchaseRequest.cs ***
+using eb7420u202323551.API.Orders.Domain.Model.Commands;
+using eb7420u202323551.API.Orders.Domain.Model.Enumerations;
+using eb7420u202323551.API.Orders.Domain.Model.ValueObjects;
+using EntityFrameworkCore.CreatedUpdatedDate.Contracts;
+using System.ComponentModel.DataAnnotations.Schema;
+
+namespace eb7420u202323551.API.Orders.Domain.Model.Aggregates;
+
+public class PurchaseRequest : IEntityWithCreatedUpdatedDate
+{
+    public int Id { get; private set; }
+    public string CustomerId { get; private set; }
+    public Sku ProductSku { get; private set; }
+    public int Quantity { get; private set; }
+    public EDeliveryMethod DeliveryMethod { get; private set; }
+    public EOrderPriority OrderPriority { get; private set; }
+    public DateTime RequestedAt { get; private set; }
+
+    [Column("CreatedAt")] public DateTimeOffset? CreatedDate { get; set; }
+    [Column("UpdatedAt")] public DateTimeOffset? UpdatedDate { get; set; }
+
+    private PurchaseRequest() { }
+
+    public PurchaseRequest(CreatePurchaseRequestCommand command)
+    {
+        if (command.Quantity <= 0) throw new ArgumentException("Quantity must be positive.");
+        if (command.RequestedAt > DateTime.Now) throw new ArgumentException("RequestedAt cannot be in the future.");
+
+        CustomerId = command.CustomerId;
+        ProductSku = new Sku(command.ProductSku);
+        Quantity = command.Quantity;
+        DeliveryMethod = command.DeliveryMethod;
+        OrderPriority = command.OrderPriority;
+        RequestedAt = command.RequestedAt;
+    }
+}
+
+*** FILE: Orders/Domain/Repositories/IPurchaseRequestRepository.cs ***
+using eb7420u202323551.API.Orders.Domain.Model.Aggregates;
+using eb7420u202323551.API.Shared.Domain.Repositories;
+
+namespace eb7420u202323551.API.Orders.Domain.Repositories;
+
+public interface IPurchaseRequestRepository : IBaseRepository<PurchaseRequest>
+{
+}
+
+*** FILE: Orders/Infrastructure/Persistence/EFC/Repositories/PurchaseRequestRepository.cs ***
+using eb7420u202323551.API.Orders.Domain.Model.Aggregates;
+using eb7420u202323551.API.Orders.Domain.Repositories;
+using eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Configuration;
+using eb7420u202323551.API.Shared.Infrastructure.Persistence.EFC.Repositories;
+
+namespace eb7420u202323551.API.Orders.Infrastructure.Persistence.EFC.Repositories;
+
+public class PurchaseRequestRepository(AppDbContext context) : BaseRepository<PurchaseRequest>(context), IPurchaseRequestRepository
+{
+}
+
+*** FILE: Orders/Infrastructure/Persistence/EFC/Configuration/PurchaseRequestConfiguration.cs ***
+using eb7420u202323551.API.Orders.Domain.Model.Aggregates;
+using eb7420u202323551.API.Orders.Domain.Model.Enumerations;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace eb7420u202323551.API.Orders.Infrastructure.Persistence.EFC.Configuration;
+
+public class PurchaseRequestConfiguration : IEntityTypeConfiguration<PurchaseRequest>
+{
+    public void Configure(EntityTypeBuilder<PurchaseRequest> builder)
+    {
+        builder.HasKey(x => x.Id);
+        builder.Property(x => x.CustomerId).IsRequired().HasMaxLength(8);
+        builder.Property(x => x.Quantity).IsRequired();
+        builder.Property(x => x.RequestedAt).IsRequired();
+
+        builder.OwnsOne(x => x.ProductSku, sku =>
+        {
+            sku.Property(s => s.Value).HasColumnName("product_sku").IsRequired().HasMaxLength(10);
+        });
+
+        builder.Property(x => x.DeliveryMethod)
+            .HasConversion(v => v.ToString(), v => (EDeliveryMethod)Enum.Parse(typeof(EDeliveryMethod), v));
+
+        builder.Property(x => x.OrderPriority)
+            .HasConversion(v => v.ToString(), v => (EOrderPriority)Enum.Parse(typeof(EOrderPriority), v));
+    }
+}
+
+*** FILE: Orders/Domain/Services/IPurchaseRequestCommandService.cs ***
+using eb7420u202323551.API.Orders.Domain.Model.Aggregates;
+using eb7420u202323551.API.Orders.Domain.Model.Commands;
+
+namespace eb7420u202323551.API.Orders.Domain.Services;
+
+public interface IPurchaseRequestCommandService
+{
+    Task<PurchaseRequest?> Handle(CreatePurchaseRequestCommand command);
+}
+
+*** FILE: Orders/Application/Internal/CommandServices/PurchaseRequestCommandService.cs ***
+using eb7420u202323551.API.Catalog.Domain.Repositories;
+using eb7420u202323551.API.Orders.Domain.Model.Commands;
+using eb7420u202323551.API.Orders.Domain.Repositories;
+using eb7420u202323551.API.Orders.Domain.Services;
+using eb7420u202323551.API.Shared.Domain.Repositories;
+
+namespace eb7420u202323551.API.Orders.Application.Internal.CommandServices;
+
+public class PurchaseRequestCommandService(
+    IPurchaseRequestRepository purchaseRequestRepository,
+    IProductRepository productRepository, 
+    IUnitOfWork unitOfWork) 
+    : IPurchaseRequestCommandService
+{
+    public async Task<Domain.Model.Aggregates.PurchaseRequest?> Handle(CreatePurchaseRequestCommand command)
+    {
+        // 1. Validar que el Producto exista (ACL)
+        var product = await productRepository.FindBySkuAsync(command.ProductSku);
+        if (product == null) throw new Exception("Product SKU not found.");
+
+        // 2. Validar Stock
+        if (command.Quantity > product.AvailableStock) throw new Exception("Insufficient stock.");
+
+        var purchaseRequest = new Domain.Model.Aggregates.PurchaseRequest(command);
+
+        try
+        {
+            await purchaseRequestRepository.AddAsync(purchaseRequest);
+            
+            // 3. Actualizar Stock del Producto
+            product.AvailableStock -= command.Quantity;
+            productRepository.Update(product);
+
+            await unitOfWork.CompleteAsync();
+            return purchaseRequest;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+}
+
+*** FILE: Orders/Infrastructure/Configuration/Extensions/WebApplicationBuilderExtensions.cs ***
+using eb7420u202323551.API.Orders.Application.Internal.CommandServices;
+using eb7420u202323551.API.Orders.Domain.Repositories;
+using eb7420u202323551.API.Orders.Domain.Services;
+using eb7420u202323551.API.Orders.Infrastructure.Persistence.EFC.Repositories;
+
+namespace eb7420u202323551.API.Orders.Infrastructure.Configuration.Extensions;
+
+public static class WebApplicationBuilderExtensions
+{
+    public static void AddOrdersContextService(this WebApplicationBuilder builder)
+    {
+        builder.Services.AddScoped<IPurchaseRequestRepository, PurchaseRequestRepository>();
+        builder.Services.AddScoped<IPurchaseRequestCommandService, PurchaseRequestCommandService>();
+    }
+}
+
+*** FILE: Orders/Interfaces/Resources/CreatePurchaseRequestResource.cs ***
+namespace eb7420u202323551.API.Orders.Interfaces.Resources;
+
+public record CreatePurchaseRequestResource(
+    string CustomerId,
+    string ProductSku,
+    int Quantity,
+    string DeliveryMethod,
+    string OrderPriority,
+    string RequestedAt
+);
+
+*** FILE: Orders/Interfaces/Resources/PurchaseRequestResource.cs ***
+namespace eb7420u202323551.API.Orders.Interfaces.Resources;
+
+public record PurchaseRequestResource(
+    int Id,
+    string CustomerId,
+    string ProductSku,
+    int Quantity,
+    string DeliveryMethod,
+    string OrderPriority,
+    DateTime RequestedAt
+);
+
+*** FILE: Orders/Interfaces/Transform/CreatePurchaseRequestCommandFromResourceAssembler.cs ***
+using eb7420u202323551.API.Orders.Domain.Model.Commands;
+using eb7420u202323551.API.Orders.Domain.Model.Enumerations;
+using eb7420u202323551.API.Orders.Interfaces.Resources;
+using System.Globalization;
+
+namespace eb7420u202323551.API.Orders.Interfaces.Transform;
+
+public static class CreatePurchaseRequestCommandFromResourceAssembler
+{
+    public static CreatePurchaseRequestCommand ToCommandFromResource(CreatePurchaseRequestResource resource)
+    {
+        if (!Enum.TryParse<EDeliveryMethod>(resource.DeliveryMethod, out var deliveryMethod))
+            throw new ArgumentException("Invalid Delivery Method");
+
+        if (!Enum.TryParse<EOrderPriority>(resource.OrderPriority, out var orderPriority))
+            throw new ArgumentException("Invalid Order Priority");
+
+        if (!DateTime.TryParseExact(resource.RequestedAt, "yyyy-MM-dd HH:mm:ss", 
+            CultureInfo.InvariantCulture, DateTimeStyles.None, out var requestedAt))
+        {
+            throw new ArgumentException("Invalid Date Format. Use yyyy-MM-dd HH:mm:ss");
+        }
+
+        return new CreatePurchaseRequestCommand(
+            resource.CustomerId,
+            resource.ProductSku,
+            resource.Quantity,
+            deliveryMethod,
+            orderPriority,
+            requestedAt
+        );
+    }
+}
+
+*** FILE: Orders/Interfaces/REST/PurchaseRequestsController.cs ***
+using eb7420u202323551.API.Orders.Domain.Services;
+using eb7420u202323551.API.Orders.Interfaces.Resources;
+using eb7420u202323551.API.Orders.Interfaces.Transform;
+using Microsoft.AspNetCore.Mvc;
+
+namespace eb7420u202323551.API.Orders.Interfaces.REST;
+
+[ApiController]
+[Route("api/v1/purchase-requests")]
+public class PurchaseRequestsController(IPurchaseRequestCommandService commandService) : ControllerBase
+{
+    [HttpPost]
+    public async Task<IActionResult> CreatePurchaseRequest([FromBody] CreatePurchaseRequestResource resource)
+    {
+        try 
+        {
+            var command = CreatePurchaseRequestCommandFromResourceAssembler.ToCommandFromResource(resource);
+            var result = await commandService.Handle(command);
+
+            if (result == null) 
+                return BadRequest("Could not create purchase request.");
+
+            // Retorno directo (puedes crear un Resource Assembler de salida si lo deseas)
+            return CreatedAtAction(nameof(CreatePurchaseRequest), new { id = result.Id }, result);
+        }
+        catch (Exception ex)
+        {
+            return BadRequest(new { message = ex.Message });
+        }
+    }
+}
